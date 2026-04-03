@@ -10,6 +10,15 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Phase 4: Google account access -->
+    <uses-permission android:name="android.permission.GET_ACCOUNTS" />
+
+    <!-- Phase 5: Read call recordings from shared storage -->
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -36,6 +45,15 @@
             android:name=".RecordingService"
             android:foregroundServiceType="microphone"
             android:exported="false" />
+
+        <!-- Triggers scan for call recordings when a phone call ends -->
+        <receiver
+            android:name=".PhoneCallReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.PHONE_STATE" />
+            </intent-filter>
+        </receiver>
 
     </application>
 

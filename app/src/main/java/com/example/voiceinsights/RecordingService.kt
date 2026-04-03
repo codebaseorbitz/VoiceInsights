@@ -13,6 +13,10 @@ import androidx.core.app.NotificationCompat
 
 class RecordingService : Service() {
 
+    companion object {
+        var isServiceRunning = false
+    }
+
     private val audioCaptureManager by lazy { AudioCaptureManager(this) }
 
     override fun onBind(intent: Intent?): IBinder? {
@@ -21,8 +25,16 @@ class RecordingService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            "START_RECORDING" -> startRecording()
-            "STOP_RECORDING" -> stopRecording()
+            "START_RECORDING" -> {
+                isServiceRunning = true
+                startRecording()
+            }
+            "STOP_RECORDING" -> {
+                isServiceRunning = false
+                stopRecording()
+            }
+            "PAUSE_FOR_CALL" -> pauseRecording()
+            "RESUME_AFTER_CALL" -> resumeRecording()
         }
         return START_STICKY
     }
@@ -52,6 +64,32 @@ class RecordingService : Service() {
         audioCaptureManager.stopCapture()
         stopForeground(true)
         stopSelf()
+    }
+
+    private fun pauseRecording() {
+        if (!isServiceRunning) return
+        Log.d("RecordingService", "Pausing for phone call...")
+        audioCaptureManager.stopCapture()
+        updateNotification("Paused during phone call")
+    }
+
+    private fun resumeRecording() {
+        if (!isServiceRunning) return
+        Log.d("RecordingService", "Resuming after phone call...")
+        audioCaptureManager.startCapture()
+        updateNotification("Recording audio in the background...")
+    }
+
+    private fun updateNotification(text: String) {
+        val notification: Notification = NotificationCompat.Builder(this, "VoiceInsightsChannel")
+            .setContentTitle("VoiceInsights Active")
+            .setContentText(text)
+            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setOngoing(true)
+            .build()
+        val manager = getSystemService(NotificationManager::class.java)
+        manager?.notify(1, notification)
     }
 
     private fun createNotificationChannel() {
