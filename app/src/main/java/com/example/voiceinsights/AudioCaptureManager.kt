@@ -9,11 +9,11 @@ import java.io.File
 
 class AudioCaptureManager(private val context: Context) {
     private var mediaRecorder: MediaRecorder? = null
+    @Volatile
     private var isRecording = false
     private var recordingJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     
-    // Chunk duration: 10 minutes (balances file size and data-loss risk)
     private val chunkDurationMs = 10 * 60 * 1000L 
 
     private fun createMediaRecorder(): MediaRecorder {
@@ -30,39 +30,60 @@ class AudioCaptureManager(private val context: Context) {
         isRecording = true
         
         recordingJob = scope.launch {
+            // Flush any leftover .m4a files from a previous session (e.g., post-call resume)
+            renameRecordingFiles()
+            val audioDir = File(context.filesDir, "audio_chunks")
+            val leftoverFiles = audioDir.listFiles { f -> f.name.endsWith(".m4a") }
+            if (!leftoverFiles.isNullOrEmpty()) {
+                Log.d("AudioCapture", "Found ${leftoverFiles.size} leftover file(s) — triggering upload")
+                DriveUploadWorker.enqueue(context)
+            }
+
             try {
                 while (isRecording && isActive) {
                     val timestamp = System.currentTimeMillis()
-                    val audioDir = File(context.filesDir, "audio_chunks").apply { mkdirs() }
-                    val currentFile = File(audioDir, "chunk_$timestamp.m4a")
+                    audioDir.mkdirs()
+                    // Use .recording extension while in progress
+                    val recordingFile = File(audioDir, "chunk_$timestamp.m4a.recording")
+                    val finalFile = File(audioDir, "chunk_$timestamp.m4a")
 
                     mediaRecorder = createMediaRecorder().apply {
                         setAudioSource(MediaRecorder.AudioSource.MIC)
                         setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
                         setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
                         setAudioChannels(1)
-                        setAudioEncodingBitRate(64000) // 64kbps AAC compresses extremely well for voice
+                        setAudioEncodingBitRate(64000)
                         setAudioSamplingRate(44100)
-                        setOutputFile(currentFile.absolutePath)
+                        setOutputFile(recordingFile.absolutePath)
                         prepare()
                         start()
                     }
 
-                    Log.d("AudioCapture", "Started new compressed .m4a chunk: ${currentFile.name}")
+                    Log.d("AudioCapture", "Recording chunk: ${recordingFile.name}")
                     
-                    // Maintain the recording for precisely the chunk duration
                     delay(chunkDurationMs)
                     
+                    // Chunk complete — stop recorder, rename to .m4a, then upload
                     stopCurrentRecorder()
-                    Log.d("AudioCapture", "Finalized chunk: ${currentFile.name}")
-                    // TODO: Trigger Drive Upload Worker for this file
+                    recordingFile.renameTo(finalFile)
+                    if (finalFile.length() == 0L) {
+                        Log.w("AudioCapture", "Empty finalized file ${finalFile.name} detected — deleting.")
+                        finalFile.delete()
+                    } else {
+                        Log.d("AudioCapture", "Finalized: ${finalFile.name} (${finalFile.length()} bytes)")
+                    }
+                    DriveUploadWorker.enqueue(context)
                 }
-            } catch (e: Exception) {
-                if (e !is CancellationException) {
-                    Log.e("AudioCapture", "Error in capture loop: ${e.message}")
-                }
-            } finally {
+            } catch (e: CancellationException) {
+                // Stopped early — save partial chunk
+                Log.d("AudioCapture", "Cancelled — saving partial chunk")
                 stopCurrentRecorder()
+                // Rename any .recording files to .m4a so they get uploaded
+                renameRecordingFiles()
+            } catch (e: Exception) {
+                Log.e("AudioCapture", "Error: ${e.message}")
+                stopCurrentRecorder()
+                renameRecordingFiles()
             }
         }
     }
@@ -76,14 +97,40 @@ class AudioCaptureManager(private val context: Context) {
             }
         } catch (e: Exception) {
             Log.e("AudioCapture", "Error stopping recorder: ${e.message}")
+            try { mediaRecorder?.release() } catch (_: Exception) {}
         } finally {
             mediaRecorder = null
         }
     }
 
+    /** Rename all .recording files to .m4a so they become uploadable */
+    private fun renameRecordingFiles() {
+        val audioDir = File(context.filesDir, "audio_chunks")
+        audioDir.listFiles { f -> f.name.endsWith(".recording") }?.forEach { file ->
+            if (file.length() == 0L) {
+                Log.w("AudioCapture", "Empty partial file ${file.name} detected — deleting.")
+                file.delete()
+            } else {
+                val finalName = file.name.removeSuffix(".recording")
+                val finalFile = File(file.parent, finalName)
+                file.renameTo(finalFile)
+                Log.d("AudioCapture", "Renamed partial: ${finalFile.name} (${finalFile.length()} bytes)")
+            }
+        }
+    }
+
     fun stopCapture() {
+        if (!isRecording) return
         isRecording = false
-        recordingJob?.cancel()
-        Log.d("AudioCapture", "Completely stopped ambient audio capture")
+        val jobToJoin = recordingJob
+        recordingJob = null
+        
+        // Wait for the recording coroutine to fully complete (including rename)
+        // before enqueueing upload — eliminates the race condition
+        scope.launch {
+            jobToJoin?.cancelAndJoin()
+            DriveUploadWorker.enqueue(context)
+        }
+        Log.d("AudioCapture", "Stopped ambient audio capture")
     }
 }
